@@ -20,7 +20,9 @@ typedef enum {
 typedef enum {
     PREPARE_SUCCESS,
     PREPARE_SYNTAX_ERROR,
-    PREPARE_UNRECOGNIZED_STATEMENT
+    PREPARE_UNRECOGNIZED_STATEMENT,
+    PREPARE_STRING_TOO_LONG,
+    PREPARE_NEGATIVE_ID
 } PrepareResult;
 
 typedef enum {
@@ -33,8 +35,8 @@ typedef enum {
 
 typedef struct {
     uint32_t id;
-    char username[COLUMN_USERNAME_SIZE];
-    char email[COLUMN_EMAIL_SIZE];
+    char username[COLUMN_USERNAME_SIZE + 1]; // +1 to allocate the null character since we are dealing with c strings
+    char email[COLUMN_EMAIL_SIZE + 1];
 } Row;
 
 typedef struct {
@@ -101,10 +103,16 @@ void close_input_buffer(InputBuffer* input_buffer){
     free(input_buffer -> buffer); // we do this because getline allocates memory for the same coz buffer was set to NULL initially.
     free(input_buffer);
 }
-
-MetaCommandResult do_meta_command(InputBuffer* input_buffer){ // currently only handles ".exit", has room for more.
+void free_table(Table* table){
+    for(int i = 0; table -> pages[i]; i++){
+        free(table -> pages[i]);
+    }
+    free(table);
+}
+MetaCommandResult do_meta_command(InputBuffer* input_buffer, Table* table){ // currently only handles ".exit", has room for more.
     if(strcmp(input_buffer -> buffer, ".exit") == 0){
         close_input_buffer(input_buffer);
+        free_table(table);
         exit(EXIT_SUCCESS);
     }
     else {
@@ -112,14 +120,35 @@ MetaCommandResult do_meta_command(InputBuffer* input_buffer){ // currently only 
     }
 }
 
+PrepareResult prepare_insert(InputBuffer* input_buffer, Statement* statement){
+    statement -> type = STATEMENT_INSERT;
+    char* keyword = strtok(input_buffer -> buffer, " ");
+    char* id_string = strtok(NULL, " ");
+    char* username = strtok(NULL, " ");
+    char* email = strtok(NULL, " ");
+
+    if(id_string == NULL || username == NULL || email == NULL){
+        return PREPARE_SYNTAX_ERROR;
+    }
+
+    int id = atoi(id_string);
+    if(id < 0){
+        return PREPARE_NEGATIVE_ID;
+    }
+    if(strlen(username) > COLUMN_USERNAME_SIZE){
+        return PREPARE_STRING_TOO_LONG;
+    }
+    if(strlen(email) > COLUMN_EMAIL_SIZE){
+        return PREPARE_STRING_TOO_LONG;
+    }
+    statement -> row_to_insert.id = id;
+    strcpy(statement -> row_to_insert.username, username);
+    strcpy(statement -> row_to_insert.email, email);
+    return PREPARE_SUCCESS;
+}
 PrepareResult prepare_statement(InputBuffer* input_buffer, Statement* statement){
     if(strncmp(input_buffer -> buffer, "insert", 6) == 0){ // insert statement might be followed by some data.
-        statement -> type = STATEMENT_INSERT;
-        int args_assigned = sscanf(input_buffer -> buffer, "insert %d %s %s", &(statement -> row_to_insert.id), statement -> row_to_insert.username, statement -> row_to_insert.email);
-        if(args_assigned < 3){
-            return PREPARE_SYNTAX_ERROR;
-        }
-        return PREPARE_SUCCESS;
+        return prepare_insert(input_buffer, statement);
     }
     if(strcmp(input_buffer -> buffer, "select") == 0){ // assuming simple SELECT statement, complex parsing might be done.
         statement -> type = STATEMENT_SELECT;
@@ -210,12 +239,7 @@ Table* new_table() {
     return table;
 }
 
-void free_table(Table* table){
-    for(int i = 0; table -> pages[i]; i++){
-        free(table -> pages[i]);
-    }
-    free(table);
-}
+
 // Prints the prompt, gets the line of input, process the line of input.
 int main(int argc, char* argv[]){
     Table* table = new_table();
@@ -234,7 +258,7 @@ int main(int argc, char* argv[]){
 
         // Parsing
         if(input_buffer -> buffer[0] == '.'){ // Handling Meta Commands
-            switch(do_meta_command(input_buffer)) {
+            switch(do_meta_command(input_buffer, table)) {
                 case(META_COMMAND_SUCCESS):
                     continue;
                 case(META_COMMAND_UNRECOGNIZED_COMMAND):
@@ -248,6 +272,12 @@ int main(int argc, char* argv[]){
             case(PREPARE_SUCCESS):
                 // execute_statement(&statement); we don't do this because switch is only to validate.
                 break;
+            case(PREPARE_NEGATIVE_ID):
+                printf("Id must be positive.\n");
+                continue;
+            case(PREPARE_STRING_TOO_LONG):
+                printf("The string is too long. \n");
+                continue;
             case(PREPARE_SYNTAX_ERROR):
                 printf("Syntax error. could not parse statement.\n");
                 continue;
